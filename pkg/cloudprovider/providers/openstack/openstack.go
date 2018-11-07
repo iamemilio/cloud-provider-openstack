@@ -38,6 +38,7 @@ import (
 	"github.com/gophercloud/gophercloud/openstack/identity/v3/extensions/trusts"
 	tokens3 "github.com/gophercloud/gophercloud/openstack/identity/v3/tokens"
 	"github.com/gophercloud/gophercloud/pagination"
+	"github.com/gophercloud/utils/openstack/clientconfig"
 	"github.com/mitchellh/mapstructure"
 	"gopkg.in/gcfg.v1"
 
@@ -255,13 +256,73 @@ func configFromEnv() (cfg Config, ok bool) {
 	return
 }
 
+// Allows Setting up of openstack credentials by reading clouds.yaml
+//
+// Looks for clouds.yaml file in the following paths in order:
+// 1. OS_CLIENT_CONFIG_FILE
+// 2. Current directory.
+// 3. unix-specific user_config_dir (~/.config/openstack/clouds.yaml)
+// 4. unix-specific site_config_dir (/etc/openstack/clouds.yaml)
+func configFromYAML() (cfg Config, ok bool){
+	clientOpts := new(clientconfig.ClientOpts)
+	cloud, err := clientconfig.GetCloudFromYAML(clientOpts)
+	if err != nil {
+		return Config{}, false
+	}
+
+	cfg.Global.AuthURL = cloud.AuthInfo.AuthURL
+	cfg.Global.Username = cloud.AuthInfo.Username
+	cfg.Global.Password = cloud.AuthInfo.Password
+	cfg.Global.Region = cloud.RegionName
+	cfg.Global.UserID = cloud.AuthInfo.UserID
+	cfg.Global.TenantID = cloud.AuthInfo.ProjectID
+	cfg.Global.TenantName = cloud.AuthInfo.ProjectName
+	cfg.Global.DomainID = cloud.AuthInfo.DomainID
+	cfg.Global.DomainName = cloud.AuthInfo.DomainID
+	cfg.Global.CAFile = cloud.CACertFile
+
+	// Retaining support for trusts via environment variables
+	// Not supported by GetCloudFromYAML
+	cfg.Global.TrustID = os.Getenv("OS_TRUST_ID")
+
+	// Supporting injecting passwords via env variables as well
+	// common use case, and not all clouds.yaml have password fields
+	if cfg.Global.Password == "" {
+		cfg.Global.Password = os.Getenv("OS_PASSWORD")
+	}
+
+	ok = cfg.Global.AuthURL != "" &&
+		cfg.Global.Username != "" &&
+		cfg.Global.Password != "" &&
+		(cfg.Global.TenantID != "" || cfg.Global.TenantName != "" ||
+			cfg.Global.DomainID != "" || cfg.Global.DomainName != "" ||
+			cfg.Global.Region != "" || cfg.Global.UserID != "" ||
+			cfg.Global.TrustID != "")
+
+	cfg.Metadata.SearchOrder = fmt.Sprintf("%s,%s", configDriveID, metadataID)
+	cfg.BlockStorage.BSVersion = "auto"
+	cfg.Networking.IPv6SupportDisabled = false
+	cfg.Networking.PublicNetworkName = "public"
+	
+	return
+}
+
 func ReadConfig(config io.Reader) (Config, error) {
 	if config == nil {
 		return Config{}, fmt.Errorf("no OpenStack cloud provider config file given")
 	}
+	var cfg Config
+	var ok bool
 
-	cfg, _ := configFromEnv()
+	// Prioritizes reading clouds.yaml over envorinment variables
+	cfg, ok = configFromYAML()
+	if !ok {
+		cfg, ok = configFromEnv()
+	}
 
+	if !ok {
+		return Config{}, fmt.Errorf("Config info missing: Please check your environment variables or clouds.yaml file and make sure none of the fields are missing.")
+	}
 	// Set default values for config params
 	cfg.BlockStorage.BSVersion = "auto"
 	cfg.BlockStorage.TrustDevicePath = false
